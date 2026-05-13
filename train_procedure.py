@@ -5,7 +5,8 @@ import torch
 def train_with_LBFGS(
     model,
     loglike_dist_tol=1e-4,
-    max_iter=50000,
+    max_iter_EM=50000,
+    max_iter_LBFGS=300,
     norm_grad_tol=1e-4,
     initial_learning_rate=1.0,
     hessian_history_size=100,
@@ -22,7 +23,7 @@ def train_with_LBFGS(
         )
         eobj_prec = 0
         success = False
-        for i_step in range(0, max_iter):
+        for i_step in range(0, max_iter_EM):
             line_search = "Armijo"
             optimizer = FullBatchLBFGS(
                 [model.variationnal_params]
@@ -55,7 +56,7 @@ def train_with_LBFGS(
             func_evals += 1
             f_old = obj.item()
 
-            for n_iter in range(max_iter):
+            for n_iter in range(max_iter_LBFGS):
                 # define closure for line search
                 def closure():
                     loss_fn = model(no_grad=True)
