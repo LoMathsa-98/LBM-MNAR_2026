@@ -167,20 +167,20 @@ def reparametrized_expanded_params(gammatheta, n1, n2, nq, nl, device):
         nl,
     ) = split_params(gammatheta, n1, n2, nq, nl)
     nu_a = r_nu_a
-    rho_a = softplus(r_rho_a).clamp(min=1e-4)
+    rho_a = softplus(r_rho_a).clamp(min=1e-6)
     nu_b = r_nu_b
-    rho_b = softplus(r_rho_b).clamp(min=1e-4)
+    rho_b = softplus(r_rho_b).clamp(min=1e-6)
     nu_p = r_nu_p
-    rho_p = softplus(r_rho_p).clamp(min=1e-4)
+    rho_p = softplus(r_rho_p).clamp(min=1e-6)
     nu_q = r_nu_q
-    rho_q = softplus(r_rho_q).clamp(min=1e-4)
+    rho_q = softplus(r_rho_q).clamp(min=1e-6)
     tau_1 = expand_simplex(torch.sigmoid(r_tau_1), device)
     tau_2 = expand_simplex(torch.sigmoid(r_tau_2), device)
     mu_un = r_mu_un
-    sigma_sq_a = softplus(r_sigma_sq_a).clamp(min=1e-4)
-    sigma_sq_b = softplus(r_sigma_sq_b).clamp(min=1e-4)
-    sigma_sq_p = softplus(r_sigma_sq_p).clamp(min=1e-4)
-    sigma_sq_q = softplus(r_sigma_sq_q).clamp(min=1e-4)
+    sigma_sq_a = softplus(r_sigma_sq_a).clamp(min=1e-6)
+    sigma_sq_b = softplus(r_sigma_sq_b).clamp(min=1e-6)
+    sigma_sq_p = softplus(r_sigma_sq_p).clamp(min=1e-6)
+    sigma_sq_q = softplus(r_sigma_sq_q).clamp(min=1e-6)
     alpha_1 = expand_simplex(
         torch.sigmoid(r_alpha_1.reshape(1, nq - 1)), device
     ).reshape(nq, 1)
