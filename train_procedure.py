@@ -1,6 +1,9 @@
 from lbfgs import FullBatchLBFGS
 import numpy as np
 import torch
+import time
+from collections import deque
+
 
 def train_with_LBFGS(
     model,
@@ -14,6 +17,7 @@ def train_with_LBFGS(
     loglike_diff_breaking_cond=1e-3,
     divide_by_line_search=2,
 ):
+    # INVARIATA rispetto alla versione precedente.
     try:
         print("-" * 80, "\nStart training LBM MNAR", "\n", "-" * 80)
         print("Number of row classes : ", model.nq)
@@ -111,12 +115,6 @@ def train_with_LBFGS(
     except Exception as e:
         print(e)
         return (False, obj.item())
-        
-        
-
-
-import time
-from collections import deque
 
 
 def train_with_LBFGS_adaptive(
@@ -136,26 +134,63 @@ def train_with_LBFGS_adaptive(
     initial_learning_rate=1.0,
     hessian_history_size=100,
     divide_by_line_search=2,
+    stop_rule="legacy",
+    cycle_grad_tol=None,
 ):
-    """Drop-in replacement di train_with_LBFGS con stop adattivo.
+    """Versione con stop adattivo. Ritorna (success, obj, info).
 
-    Aggiunge tre meccanismi di stop:
-      1) Tolleranza adattiva sul tempo (start strict, end loose).
-      2) Rilevatore di oscillazione (range piccolo + molti cambi di segno).
-      3) Rilevatore di plateau (valori quasi costanti).
+    obj  = criteria() = -J (L-BFGS minimizza).
+    info = dict con: stop_reason, stop_rule, n_em_steps, n_obj_increases,
+           grad_norm_gamma, grad_norm_theta, final_grad_norm (max dei due),
+           tol_at_stop, elapsed_at_stop.
+
+    stop_rule:
+      'legacy' : comportamento precedente (confronto tra l'inizio di due passi
+                 EM consecutivi, cioe' il guadagno di UN solo blocco).
+      'cycle'  : confronto tra l'inizio del passo i e del passo i-2 (ciclo
+                 completo gamma+theta). Se cycle_grad_tol non e' None richiede
+                 anche che l'ultima norma del gradiente di entrambi i blocchi
+                 sia sotto cycle_grad_tol.
+
+    stop_reason in {'tol', 'oscillation', 'plateau', 'max_iter_EM',
+                    'error: <msg>'}. success=True per tol/oscillation/plateau,
+    ma solo 'tol' va considerata convergenza "pulita".
+    tol_growth=1.0 rende la soglia indipendente dal tempo.
     """
+    if stop_rule not in ("legacy", "cycle"):
+        raise ValueError("stop_rule deve essere 'legacy' o 'cycle'")
+
     t0 = time.time()
     hist = deque(maxlen=osc_window)
     obj = None
+    i_step = -1
+    n_obj_increases = 0
+    block_grad = [None, None]          # [gamma, theta]
+    start_vals = []
+    stop_reason = "max_iter_EM"
+    tol_now = loglike_diff_breaking_cond
+    success = False
+
+    def _info():
+        gs = [g for g in block_grad if g is not None]
+        return {
+            "stop_reason": stop_reason, "stop_rule": stop_rule,
+            "n_em_steps": i_step + 1, "n_obj_increases": n_obj_increases,
+            "grad_norm_gamma": block_grad[0], "grad_norm_theta": block_grad[1],
+            "final_grad_norm": max(gs) if gs else None,
+            "tol_at_stop": float(tol_now),
+            "elapsed_at_stop": time.time() - t0,
+        }
+
     try:
         print("-" * 80, "\nStart training LBM MNAR (adaptive)", "\n", "-" * 80)
         print("Number of row classes : ", model.nq)
         print("Number of col classes : ", model.nl)
         eobj_prec = 0
-        success = False
         for i_step in range(max_iter_EM):
+            blk = i_step % 2
             optimizer = FullBatchLBFGS(
-                [model.variationnal_params] if i_step % 2 == 0
+                [model.variationnal_params] if blk == 0
                 else [model.model_params],
                 lr=initial_learning_rate,
                 history_size=hessian_history_size,
@@ -166,15 +201,27 @@ def train_with_LBFGS_adaptive(
             obj = model()
             obj.backward()
             f_old = obj.item()
+            f_start = f_old
+            start_vals.append(f_start)
 
             # --- tolleranza adattiva sul tempo ---
             frac = min((time.time() - t0) / time_budget_s, 1.0)
             tol_now = loglike_diff_breaking_cond * (1 + (tol_growth - 1) * frac ** 2)
-            if i_step > 1 and abs(eobj_prec - obj.item()) < tol_now:
+
+            if stop_rule == "legacy":
+                stop_now = i_step > 1 and abs(eobj_prec - f_start) < tol_now
+            else:
+                stop_now = (i_step > 2
+                            and abs(start_vals[-3] - f_start) < tol_now)
+                if stop_now and cycle_grad_tol is not None:
+                    stop_now = all(g is not None and g < cycle_grad_tol
+                                   for g in block_grad)
+            if stop_now:
                 print(f"[stop EM: tol={tol_now:.2e}, frac={frac:.2f}]")
                 success = True
+                stop_reason = "tol"
                 break
-            eobj_prec = obj.item()
+            eobj_prec = f_start
 
             for n_iter in range(max_iter_LBFGS):
                 def closure():
@@ -198,6 +245,8 @@ def train_with_LBFGS_adaptive(
                 obj = model()
                 obj.backward()
                 grad = optimizer._gather_flat_grad()
+                gnorm = float(torch.norm(grad))
+                block_grad[blk] = gnorm
 
                 if optimizer.state["global_state"]["fail_skips"] > 0:
                     raise Exception("BFGS failed : fail_skip")
@@ -206,9 +255,13 @@ def train_with_LBFGS_adaptive(
                 if np.isnan(obj.item()):
                     raise Exception("Objective is NAN (empty class?)")
 
-                if torch.norm(grad) < norm_grad_tol or abs(obj.item() - f_old) < loglike_dist_tol:
+                if gnorm < norm_grad_tol or abs(obj.item() - f_old) < loglike_dist_tol:
                     break
                 f_old = obj.item()
+
+            # monotonia: -J non dovrebbe aumentare durante un blocco
+            if obj.item() > f_start + 1e-9:
+                n_obj_increases += 1
 
             # --- rilevatore di oscillazione / plateau ---
             hist.append(obj.item())
@@ -221,14 +274,18 @@ def train_with_LBFGS_adaptive(
                 if rng < osc_band and sign_flips > osc_sign_frac * (osc_window - 2):
                     print(f"[stop: oscillazione, rng={rng:.2e}, flips={sign_flips}]")
                     success = True
+                    stop_reason = "oscillation"
                     break
 
                 if vals.std() < plateau_std and (vals[-1] - vals.min()) < plateau_range:
                     print(f"[stop: plateau, std={vals.std():.2e}]")
                     success = True
+                    stop_reason = "plateau"
                     break
 
-        return (success, obj.item() if obj is not None else float('nan'))
+        return (success, obj.item() if obj is not None else float('nan'), _info())
     except Exception as e:
         print(e)
-        return (False, obj.item() if obj is not None else float('nan'))
+        stop_reason = f"error: {str(e)[:150]}"
+        return (False, obj.item() if obj is not None else float('nan'), _info())
+
